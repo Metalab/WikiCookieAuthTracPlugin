@@ -5,54 +5,42 @@ http://trac.edgewall.org
 
 import os
 
-from trac.config import ListOption
 from trac.core import *
-from trac.web import auth
 from trac.web.api import IAuthenticator
-from trac.web.main import RequestDispatcher
-from trac.env import open_environment
 from trac.env import IEnvironmentSetupParticipant
 
-class GenericObject(object):
-    def __init__(self, **kw):
-        for key, item in kw.items():
-            setattr(self, key, item)
+PHP_SESSION_PATH = '/var/lib/php5/'
+SESSION_COOKIE = 'metalabwiki_session'
+TOKEN_COOKIE = 'metalabwikiToken'
 
 
 class WikiCookieAuth(Component):
-
-    ### class-level data
     implements(IAuthenticator, IEnvironmentSetupParticipant)
 
-    ### method for IAuthenticator
-
     def authenticate(self, req):
-
         if req.remote_user:
             return req.remote_user
 
         if 'wiki_cookie_auth' in req.environ:
             return req.environ['wiki_cookie_auth']
         else:
+            wiki_session = req.incookie.get(SESSION_COOKIE)
+            wiki_token = req.incookie.get(TOKEN_COOKIE)
             req.environ['wiki_cookie_auth'] = None
-            if req.incookie.has_key('trac_auth'):
-                for project, dispatcher in self.dispatchers().items():
-                    agent = dispatcher.authenticate(req)
-                    if agent != 'anonymous':
-                        req.authname = agent
-                        req.environ['wiki_cookie_auth'] = agent
-                        return agent
+            if wiki_session and wiki_token:
+                agent = self.wiki_auth(wiki_session.value, wiki_token.value)
+                if agent and agent != 'anonymous':
+                    agent = agent.lower()
+                    req.authname = agent
+                    req.environ['wiki_cookie_auth'] = agent
+                    return agent
 
         return None
 
-    ### methods for IEnvironmentSetupParticipant
-
-    """Extension point interface for components that need to participate in the
-    creation and upgrading of Trac environments, for example to create
-    additional database tables."""
 
     def environment_created(self):
         """Called when a new Trac environment is created."""
+
 
     def environment_needs_upgrade(self, db):
         """Called when Trac checks whether the environment needs to be upgraded.
@@ -71,24 +59,24 @@ class WikiCookieAuth(Component):
         performed the upgrades they need without an error being raised.
         """
 
-    ### internal methods
 
-    def dispatchers(self):
-        if not hasattr(self, '_dispatchers'):
+    def wiki_auth(self, session, token):
+        """Lookup MediaWiki's session file and compare tokens.
+        Returns the wiki username (or None if unsuccessful."""
 
-            dispatchers = {}
-            base_path, project = os.path.split(self.env.path)
-            projects = [ i for i in os.listdir(base_path)
-                         if i != project ]
+        try:
+            session_file = os.path.join(PHP_SESSION_PATH, 'sess_%s' % session)
+            with open(session_file, 'r') as fp:
+                session_data = fp.read().strip(';')
+        except IOError:
+            # no such session exists
+            return None
 
-            for project in projects:
-                path = os.path.join(base_path, project)
-                try:
-                    env = open_environment(path)
-                    rd = RequestDispatcher(env)
-                except:
-                    continue
-                dispatchers[project] = rd
+        items = dict(item.split('|') for item in session_data.split(';'))
+        session_token = items.get('wsToken').split(':')[-1].strip('"')
+        session_user = items.get('wsUserName').split(':')[-1].strip('"')
 
-            self._dispatchers = dispatchers
-        return self._dispatchers
+        if session_token == token:
+            return session_user
+
+        return None
